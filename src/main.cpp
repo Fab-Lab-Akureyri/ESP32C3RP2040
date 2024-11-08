@@ -17,6 +17,10 @@ WebServer server(80);
 // Variables to store system information
 String systemInfo = "{}";  // Initial empty JSON string
 
+String systemInfoBuffer = ""; // Buffer for serial data
+unsigned long lastSystemInfoUpdate = 0; // For non-blocking system info updates
+const unsigned long SYSTEM_INFO_UPDATE_INTERVAL = 1000; // 1 second interval
+
 void handleRoot() {
   String page = "<!DOCTYPE html><html><head><title>System Monitor</title>";
   page += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">";
@@ -26,14 +30,14 @@ void handleRoot() {
   page += "button.red {background-color: red; color: white;}";
   page += "button.green {background-color: green; color: white;}";
   page += "button.blue {background-color: blue; color: white;}";
-  page += "#systemInfo {display: flex; flex-direction: column; align-items: center; margin-top: 20px;}";  // Center-align system info
+  page += "#systemInfo {display: flex; flex-direction: column; align-items: center; margin-top: 20px;}";
   page += ".info-item {display: flex; justify-content: space-between; width: 100%; max-width: 400px; padding: 8px; border-bottom: 1px solid #ddd;}";
   page += ".label {font-weight: bold;}";
   page += "</style></head><body>";
   page += "<h1>Control the RP2040 NeoPixel & Monitor System</h1>";
   page += "<button class=\"off\" onclick=\"sendColor('OFF')\">OFF</button>";
   page += "<button class=\"red\" onclick=\"sendColor('RED')\">RED</button>";
-  page += "<button class=\"green\" onclick=\"sendColor('GRN')\">GREEN</button>";
+  page += "<button class=\"green\" onclick=\"sendColor('GREEN')\">GRN</button>";
   page += "<button class=\"blue\" onclick=\"sendColor('BLUE')\">BLUE</button>";
   page += "<h2>System Information</h2><div id=\"systemInfo\"></div>";
   page += "<script>";
@@ -45,16 +49,16 @@ void handleRoot() {
   page += "function fetchSystemInfo() {";
   page += "  fetch('/systeminfo').then(response => response.json()).then(data => {";
   page += "    const systemInfoDiv = document.getElementById('systemInfo');";
-  page += "    systemInfoDiv.innerHTML = '';";  // Clear existing content";
+  page += "    systemInfoDiv.innerHTML = '';";
   page += "    for (const [key, value] of Object.entries(data)) {";
   page += "      const item = document.createElement('div');";
   page += "      item.classList.add('info-item');";
   page += "      item.innerHTML = `<span class='label'>${key}:</span> <span>${value}</span>`;";
   page += "      systemInfoDiv.appendChild(item);";
   page += "    }";
-  page += "  });";
+  page += "  }).catch(error => console.log('Error fetching system info:', error));"; // Catch JSON parsing errors
   page += "}";
-  page += "setInterval(fetchSystemInfo, 1000);"; // Update every second
+  page += "setInterval(fetchSystemInfo, 1000);";
   page += "</script></body></html>";
   server.send(200, "text/html", page);
 }
@@ -64,24 +68,28 @@ void handleSetColor() {
     String color = server.arg("color");
     Serial.print("Color selected: ");
     Serial.println(color);
-    // Send the command over UART to RP2040
+    // Send the command over UART to RP2040 immediately
     SerialPort.print(color + "\n");
-    server.send(204, "text/plain", ""); // No content response
+    server.send(204, "text/plain", "");
   } else {
     server.send(400, "text/plain", "Color not specified");
   }
 }
 
 void handleSystemInfo() {
-  server.send(200, "application/json", systemInfo); // Send system info JSON
+  // Ensure valid JSON is sent in response
+  if (systemInfo.startsWith("{") && systemInfo.endsWith("}")) {
+    server.send(200, "application/json", systemInfo);
+  } else {
+    server.send(200, "application/json", "{}"); // Fallback empty JSON to avoid client errors
+  }
 }
 
 void setup() {
-  Serial.begin(115200); // Initialize USB serial console
-  SerialPort.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN); // Initialize UART1
+  Serial.begin(115200); 
+  SerialPort.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
   Serial.println("ESP32-C3 UART Transmitter Initialized");
 
-  // Start Wi-Fi in AP mode with a static IP
   WiFi.softAP(ssid, password);
   IPAddress local_ip(192, 168, 4, 1);
   IPAddress gateway(192, 168, 4, 1);
@@ -91,7 +99,6 @@ void setup() {
   Serial.print("Static IP address: ");
   Serial.println(local_ip);
 
-  // Set up web server
   server.on("/", handleRoot);
   server.on("/setcolor", handleSetColor);
   server.on("/systeminfo", handleSystemInfo);
@@ -100,19 +107,29 @@ void setup() {
 }
 
 void loop() {
-  server.handleClient();
+  server.handleClient(); // Non-blocking
 
-  // Listen for data from RP2040 over UART
-  if (SerialPort.available()) {
-    String receivedData = SerialPort.readStringUntil('\n');
-    Serial.print("Received from RP2040: ");
-    Serial.println(receivedData); // Print to serial monitor
+  unsigned long currentMillis = millis();
 
-    // Check if received data is valid JSON-like format
-    if (receivedData.startsWith("{") && receivedData.endsWith("}")) {
-        systemInfo = receivedData;
+  // Non-blocking serial read
+  while (SerialPort.available()) {
+    char receivedChar = SerialPort.read();
+    if (receivedChar == '\n') {
+      // End of JSON data, validate and update system info
+      if (systemInfoBuffer.startsWith("{") && systemInfoBuffer.endsWith("}")) {
+        systemInfo = systemInfoBuffer;
+      }
+      systemInfoBuffer = ""; // Clear buffer after processing
     } else {
-        Serial.println("Received data is not in the expected JSON format");
+      systemInfoBuffer += receivedChar; // Append character to buffer
+    }
+  }
+
+  // Update system info only at intervals
+  if (currentMillis - lastSystemInfoUpdate >= SYSTEM_INFO_UPDATE_INTERVAL) {
+    lastSystemInfoUpdate = currentMillis;
+    if (systemInfo.isEmpty()) {
+      systemInfo = "{}"; // Ensure systemInfo is valid JSON if nothing received
     }
   }
 }
